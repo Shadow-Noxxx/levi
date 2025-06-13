@@ -21,6 +21,10 @@ class AFK(BASE):
         return "afk_status for {}".format(self.user_id)
 
 
+# ✅ Create the table if it doesn't exist
+AFK.__table__.create(checkfirst=True)
+
+
 INSERTION_LOCK = threading.RLock()
 AFK_USERS = {}
 
