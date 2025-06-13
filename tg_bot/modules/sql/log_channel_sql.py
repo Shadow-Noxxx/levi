@@ -1,12 +1,11 @@
 import threading
-
 from sqlalchemy import Column, String, func, distinct
-
 from tg_bot.modules.sql import BASE, SESSION
 
 
 class GroupLogs(BASE):
     __tablename__ = "log_channels"
+
     chat_id = Column(String(14), primary_key=True)
     log_channel = Column(String(14), nullable=False)
 
@@ -15,10 +14,7 @@ class GroupLogs(BASE):
         self.log_channel = str(log_channel)
 
 
-GroupLogs.__table__.create(checkfirst=True)
-
 LOGS_INSERTION_LOCK = threading.RLock()
-
 CHANNELS = {}
 
 
@@ -26,12 +22,12 @@ def set_chat_log_channel(chat_id, log_channel):
     with LOGS_INSERTION_LOCK:
         res = SESSION.query(GroupLogs).get(str(chat_id))
         if res:
-            res.log_channel = log_channel
+            res.log_channel = str(log_channel)
         else:
             res = GroupLogs(chat_id, log_channel)
             SESSION.add(res)
 
-        CHANNELS[str(chat_id)] = log_channel
+        CHANNELS[str(chat_id)] = str(log_channel)
         SESSION.commit()
 
 
@@ -43,10 +39,9 @@ def stop_chat_logging(chat_id):
     with LOGS_INSERTION_LOCK:
         res = SESSION.query(GroupLogs).get(str(chat_id))
         if res:
+            log_channel = res.log_channel
             if str(chat_id) in CHANNELS:
                 del CHANNELS[str(chat_id)]
-
-            log_channel = res.log_channel
             SESSION.delete(res)
             SESSION.commit()
             return log_channel
@@ -65,8 +60,9 @@ def migrate_chat(old_chat_id, new_chat_id):
         if chat:
             chat.chat_id = str(new_chat_id)
             SESSION.add(chat)
+
             if str(old_chat_id) in CHANNELS:
-                CHANNELS[str(new_chat_id)] = CHANNELS.get(str(old_chat_id))
+                CHANNELS[str(new_chat_id)] = CHANNELS.pop(str(old_chat_id))
 
         SESSION.commit()
 
@@ -80,4 +76,5 @@ def __load_log_channels():
         SESSION.close()
 
 
+# Load data on startup
 __load_log_channels()
