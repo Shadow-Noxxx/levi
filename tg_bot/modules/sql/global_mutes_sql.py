@@ -1,12 +1,11 @@
 import threading
-
 from sqlalchemy import Column, UnicodeText, Integer, String, Boolean
-
 from tg_bot.modules.sql import BASE, SESSION
 
 
 class GloballyMutedUsers(BASE):
     __tablename__ = "gmutes"
+
     user_id = Column(Integer, primary_key=True)
     name = Column(UnicodeText, nullable=False)
     reason = Column(UnicodeText)
@@ -17,16 +16,15 @@ class GloballyMutedUsers(BASE):
         self.reason = reason
 
     def __repr__(self):
-        return "<GMuted User {} ({})>".format(self.name, self.user_id)
+        return f"<GMuted User {self.name} ({self.user_id})>"
 
     def to_dict(self):
-        return {"user_id": self.user_id,
-                "name": self.name,
-                "reason": self.reason}
+        return {"user_id": self.user_id, "name": self.name, "reason": self.reason}
 
 
 class GmuteSettings(BASE):
     __tablename__ = "gmute_settings"
+
     chat_id = Column(String(14), primary_key=True)
     setting = Column(Boolean, default=True, nullable=False)
 
@@ -35,14 +33,14 @@ class GmuteSettings(BASE):
         self.setting = enabled
 
     def __repr__(self):
-        return "<Gmute setting {} ({})>".format(self.chat_id, self.setting)
+        return f"<Gmute setting {self.chat_id} ({self.setting})>"
 
 
-GloballyMutedUsers.__table__.create(checkfirst=True)
-GmuteSettings.__table__.create(checkfirst=True)
-
+# Thread-safe locks
 GMUTED_USERS_LOCK = threading.RLock()
 GMUTE_SETTING_LOCK = threading.RLock()
+
+# In-memory cache
 GMUTED_LIST = set()
 GMUTESTAT_LIST = set()
 
@@ -66,6 +64,7 @@ def update_gmute_reason(user_id, name, reason=None):
         user = SESSION.query(GloballyMutedUsers).get(user_id)
         if not user:
             return False
+
         user.name = name
         user.reason = reason
 
@@ -79,7 +78,6 @@ def ungmute_user(user_id):
         user = SESSION.query(GloballyMutedUsers).get(user_id)
         if user:
             SESSION.delete(user)
-
         SESSION.commit()
         __load_gmuted_userid_list()
 
@@ -111,8 +109,7 @@ def enable_gmutes(chat_id):
         chat.setting = True
         SESSION.add(chat)
         SESSION.commit()
-        if str(chat_id) in GMUTESTAT_LIST:
-            GMUTESTAT_LIST.remove(str(chat_id))
+        GMUTESTAT_LIST.discard(str(chat_id))
 
 
 def disable_gmutes(chat_id):
@@ -146,7 +143,9 @@ def __load_gmuted_userid_list():
 def __load_gmute_stat_list():
     global GMUTESTAT_LIST
     try:
-        GMUTESTAT_LIST = {x.chat_id for x in SESSION.query(GmuteSettings).all() if not x.setting}
+        GMUTESTAT_LIST = {
+            x.chat_id for x in SESSION.query(GmuteSettings).all() if not x.setting
+        }
     finally:
         SESSION.close()
 
@@ -155,12 +154,11 @@ def migrate_chat(old_chat_id, new_chat_id):
     with GMUTE_SETTING_LOCK:
         chat = SESSION.query(GmuteSettings).get(str(old_chat_id))
         if chat:
-            chat.chat_id = new_chat_id
+            chat.chat_id = str(new_chat_id)
             SESSION.add(chat)
-
         SESSION.commit()
 
 
-# Create in memory userid to avoid disk access
+# Cache data at startup
 __load_gmuted_userid_list()
 __load_gmute_stat_list()
