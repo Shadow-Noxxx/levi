@@ -1,12 +1,11 @@
 import threading
-
 from sqlalchemy import Column, String, UnicodeText, func, distinct
-
 from tg_bot.modules.sql import SESSION, BASE
 
 
 class Disable(BASE):
     __tablename__ = "disabled_commands"
+
     chat_id = Column(String(14), primary_key=True)
     command = Column(UnicodeText, primary_key=True)
 
@@ -15,12 +14,10 @@ class Disable(BASE):
         self.command = command
 
     def __repr__(self):
-        return "Disabled cmd {} in {}".format(self.command, self.chat_id)
+        return f"Disabled cmd {self.command} in {self.chat_id}"
 
 
-Disable.__table__.create(checkfirst=True)
 DISABLE_INSERTION_LOCK = threading.RLock()
-
 DISABLED = {}
 
 
@@ -45,7 +42,7 @@ def enable_command(chat_id, enable):
         disabled = SESSION.query(Disable).get((str(chat_id), enable))
 
         if disabled:
-            if enable in DISABLED.get(str(chat_id)):  # sanity check
+            if enable in DISABLED.get(str(chat_id), set()):
                 DISABLED.setdefault(str(chat_id), set()).remove(enable)
 
             SESSION.delete(disabled)
@@ -97,7 +94,6 @@ def __load_disabled_commands():
         all_chats = SESSION.query(Disable).all()
         for chat in all_chats:
             DISABLED.setdefault(chat.chat_id, set()).add(chat.command)
-
     finally:
         SESSION.close()
 
