@@ -5,6 +5,7 @@ from tg_bot.modules.sql import BASE, SESSION
 
 class GloballyBannedUsers(BASE):
     __tablename__ = "gbans"
+
     user_id = Column(Integer, primary_key=True)
     name = Column(UnicodeText, nullable=False)
     reason = Column(UnicodeText)
@@ -27,6 +28,7 @@ class GloballyBannedUsers(BASE):
 
 class GbanSettings(BASE):
     __tablename__ = "gban_settings"
+
     chat_id = Column(String(14), primary_key=True)
     setting = Column(Boolean, default=True, nullable=False)
 
@@ -38,12 +40,11 @@ class GbanSettings(BASE):
         return f"<Gban setting {self.chat_id} ({self.setting})>"
 
 
-# Remove these lines ⛔️
-# GloballyBannedUsers.__table__.create(checkfirst=True)
-# GbanSettings.__table__.create(checkfirst=True)
-
+# Thread-safe locks
 GBANNED_USERS_LOCK = threading.RLock()
 GBAN_SETTING_LOCK = threading.RLock()
+
+# In-memory storage
 GBANNED_LIST = set()
 GBANSTAT_LIST = set()
 
@@ -153,11 +154,11 @@ def migrate_chat(old_chat_id, new_chat_id):
     with GBAN_SETTING_LOCK:
         chat = SESSION.query(GbanSettings).get(str(old_chat_id))
         if chat:
-            chat.chat_id = new_chat_id
+            chat.chat_id = str(new_chat_id)
             SESSION.add(chat)
         SESSION.commit()
 
 
-# Load data into memory at startup
+# Preload data into memory at bot startup
 __load_gbanned_userid_list()
 __load_gban_stat_list()
