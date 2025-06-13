@@ -1,21 +1,20 @@
-import os
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import scoped_session, sessionmaker
+from sqlalchemy.orm import sessionmaker, scoped_session
 
-# Path to SQLite DB file (you can change it to a full path if needed)
-DB_PATH = os.path.join(os.path.dirname(__file__), "database.sqlite")
+import os
 
-# Create SQLite engine
+# Path to your SQLite DB
+DB_PATH = os.path.join(os.path.dirname(__file__), "levi.sqlite3")
+
 engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
-
-# Declare Base and Session
 BASE = declarative_base()
-SESSION = scoped_session(sessionmaker(bind=engine, autoflush=False))
 
-# Import all models that define tables before calling create_all
-# (to ensure all tables are registered with BASE)
-import tg_bot.modules.sql.global_bans_sql  # Add more as needed
+session_factory = sessionmaker(bind=engine)
+SESSION = scoped_session(session_factory)
 
-# Create all tables (if they don't exist)
+# Import all modules with models BEFORE creating tables
+import tg_bot.modules.sql.global_bans_sql  # and other sql modules
+
+# Create all tables
 BASE.metadata.create_all(bind=engine)
