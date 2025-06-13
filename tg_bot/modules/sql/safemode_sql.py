@@ -1,31 +1,42 @@
 import threading
+from typing import Union
+
 from sqlalchemy import Column, String, Boolean
+
 from tg_bot.modules.sql import SESSION, BASE
 
+
 class Safemode(BASE):
-    __tablename__="Safemode"
+    __tablename__ = "safemode"
     chat_id = Column(String(14), primary_key=True)
     safemode_status = Column(Boolean, default=False)
 
-    def __init__(self, chat_id, safemode_status=False):
-        self.chat_id = str(chat_id) # ensure string
+    def __init__(self, chat_id: Union[int, str], safemode_status: bool = False):
+        self.chat_id = str(chat_id)
         self.safemode_status = safemode_status
 
-Safemode.__table__.create(checkfirst=True)
-SAFEMODE_INSERTION_LOCK = threading.RLock()
+    def __repr__(self):
+        return f"<Safemode chat_id={self.chat_id} status={self.safemode_status}>"
 
-def set_safemode(chat_id, safemode_status=True):
-    with SAFEMODE_INSERTION_LOCK:
-        curr = SESSION.query(Safemode).get((str(chat_id)))
+
+SAFEMODE_LOCK = threading.RLock()
+
+
+def set_safemode(chat_id: Union[int, str], safemode_status: bool = True):
+    with SAFEMODE_LOCK:
+        chat_id = str(chat_id)
+        curr = SESSION.query(Safemode).get(chat_id)
         if curr:
-            SESSION.delete(curr)
-        switch_status = Safemode(str(chat_id), safemode_status)
-
-        SESSION.add(switch_status)
+            curr.safemode_status = safemode_status
+        else:
+            curr = Safemode(chat_id, safemode_status)
+            SESSION.add(curr)
         SESSION.commit()
 
-def is_safemoded(chat_id):
+
+def is_safemoded(chat_id: Union[int, str]) -> bool:
     try:
-        return SESSION.query(Safemode).get((str(chat_id)))
+        record = SESSION.query(Safemode).get(str(chat_id))
+        return record.safemode_status if record else False
     finally:
         SESSION.close()
