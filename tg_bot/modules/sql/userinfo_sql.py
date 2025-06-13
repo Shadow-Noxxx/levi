@@ -1,4 +1,5 @@
 import threading
+from typing import Optional
 
 from sqlalchemy import Column, Integer, UnicodeText
 
@@ -7,94 +8,88 @@ from tg_bot.modules.sql import SESSION, BASE
 
 class UserInfo(BASE):
     __tablename__ = "userinfo"
+
     user_id = Column(Integer, primary_key=True)
     info = Column(UnicodeText)
 
-    def __init__(self, user_id, info):
+    def __init__(self, user_id: int, info: str):
         self.user_id = user_id
         self.info = info
 
     def __repr__(self):
-        return "<User info %d>" % self.user_id
+        return f"<UserInfo user_id={self.user_id}>"
 
 
 class UserBio(BASE):
     __tablename__ = "userbio"
+
     user_id = Column(Integer, primary_key=True)
     bio = Column(UnicodeText)
 
-    def __init__(self, user_id, bio):
+    def __init__(self, user_id: int, bio: str):
         self.user_id = user_id
         self.bio = bio
 
     def __repr__(self):
-        return "<User info %d>" % self.user_id
+        return f"<UserBio user_id={self.user_id}>"
 
-
-UserInfo.__table__.create(checkfirst=True)
-UserBio.__table__.create(checkfirst=True)
 
 INSERTION_LOCK = threading.RLock()
 
 
-def get_user_me_info(user_id):
-    userinfo = SESSION.query(UserInfo).get(user_id)
-    SESSION.close()
-    if userinfo:
-        return userinfo.info
-    return None
-
-
-def set_user_me_info(user_id, info):
-    with INSERTION_LOCK:
+def get_user_me_info(user_id: int) -> Optional[str]:
+    try:
         userinfo = SESSION.query(UserInfo).get(user_id)
-        if userinfo:
-            userinfo.info = info
+        return userinfo.info if userinfo else None
+    finally:
+        SESSION.close()
+
+
+def set_user_me_info(user_id: int, info: str):
+    with INSERTION_LOCK:
+        record = SESSION.query(UserInfo).get(user_id)
+        if record:
+            record.info = info
         else:
-            userinfo = UserInfo(user_id, info)
-        SESSION.add(userinfo)
+            record = UserInfo(user_id, info)
+            SESSION.add(record)
         SESSION.commit()
 
 
-def get_user_bio(user_id):
-    userbio = SESSION.query(UserBio).get(user_id)
-    SESSION.close()
-    if userbio:
-        return userbio.bio
-    return None
-
-
-def set_user_bio(user_id, bio):
-    with INSERTION_LOCK:
+def get_user_bio(user_id: int) -> Optional[str]:
+    try:
         userbio = SESSION.query(UserBio).get(user_id)
-        if userbio:
-            userbio.bio = bio
-        else:
-            userbio = UserBio(user_id, bio)
+        return userbio.bio if userbio else None
+    finally:
+        SESSION.close()
 
-        SESSION.add(userbio)
+
+def set_user_bio(user_id: int, bio: str):
+    with INSERTION_LOCK:
+        record = SESSION.query(UserBio).get(user_id)
+        if record:
+            record.bio = bio
+        else:
+            record = UserBio(user_id, bio)
+            SESSION.add(record)
         SESSION.commit()
 
 
-def clear_user_info(user_id):
+def clear_user_info(user_id: int) -> bool:
     with INSERTION_LOCK:
-        curr = SESSION.query(UserInfo).get(user_id)
-        if curr:
-            SESSION.delete(curr)
+        record = SESSION.query(UserInfo).get(user_id)
+        if record:
+            SESSION.delete(record)
             SESSION.commit()
             return True
-
-        SESSION.close()
-    return False
+        return False
 
 
-def clear_user_bio(user_id):
+def clear_user_bio(user_id: int) -> bool:
     with INSERTION_LOCK:
-        curr = SESSION.query(UserBio).get(user_id)
-        if curr:
-            SESSION.delete(curr)
+        record = SESSION.query(UserBio).get(user_id)
+        if record:
+            SESSION.delete(record)
             SESSION.commit()
             return True
-
-        SESSION.close()
-    return False
+        return False
