@@ -1,138 +1,82 @@
 import threading
 from typing import Optional, Tuple, List
+from pymongo import ReturnDocument
 
-from sqlalchemy import Integer, Column, String, UnicodeText, func, distinct, Boolean
-from sqlalchemy.dialects import postgresql
+from sql import db
 
-from tg_bot.modules.sql import SESSION, BASE
-
-
-class Warns(BASE):
-    __tablename__ = "warns"
-
-    user_id = Column(Integer, primary_key=True)
-    chat_id = Column(String(14), primary_key=True)
-    num_warns = Column(Integer, default=0)
-    reasons = Column(postgresql.ARRAY(UnicodeText))
-
-    def __init__(self, user_id: int, chat_id: str):
-        self.user_id = user_id
-        self.chat_id = str(chat_id)
-        self.num_warns = 0
-        self.reasons = []
-
-    def __repr__(self):
-        return f"<{self.num_warns} warns for {self.user_id} in {self.chat_id} for reasons {self.reasons}>"
-
-
-class WarnFilters(BASE):
-    __tablename__ = "warn_filters"
-
-    chat_id = Column(String(14), primary_key=True)
-    keyword = Column(UnicodeText, primary_key=True, nullable=False)
-    reply = Column(UnicodeText, nullable=False)
-
-    def __init__(self, chat_id: str, keyword: str, reply: str):
-        self.chat_id = str(chat_id)
-        self.keyword = keyword
-        self.reply = reply
-
-    def __repr__(self):
-        return f"<WarnFilter {self.keyword} for chat {self.chat_id}>"
-
-    def __eq__(self, other):
-        return isinstance(other, WarnFilters) and self.chat_id == other.chat_id and self.keyword == other.keyword
-
-
-class WarnSettings(BASE):
-    __tablename__ = "warn_settings"
-
-    chat_id = Column(String(14), primary_key=True)
-    warn_limit = Column(Integer, default=3)
-    soft_warn = Column(Boolean, default=False)
-
-    def __init__(self, chat_id: str, warn_limit: int = 3, soft_warn: bool = False):
-        self.chat_id = str(chat_id)
-        self.warn_limit = warn_limit
-        self.soft_warn = soft_warn
-
-    def __repr__(self):
-        return f"<{self.chat_id} has warn limit {self.warn_limit}>"
-
+warns_col = db["warns"]
+warn_filters_col = db["warn_filters"]
+warn_settings_col = db["warn_settings"]
 
 # Locks
 WARN_INSERTION_LOCK = threading.RLock()
 WARN_FILTER_INSERTION_LOCK = threading.RLock()
 WARN_SETTINGS_LOCK = threading.RLock()
 
-# Cache for fast access
+# Cache
 WARN_FILTERS: dict[str, List[str]] = {}
 
 
 # Warn Management
 def warn_user(user_id: int, chat_id: str, reason: Optional[str] = None) -> Tuple[int, List[str]]:
     with WARN_INSERTION_LOCK:
-        warned_user = SESSION.query(Warns).get((user_id, str(chat_id))) or Warns(user_id, chat_id)
-        warned_user.num_warns += 1
-        if reason:
-            warned_user.reasons = (warned_user.reasons or []) + [reason]
+        record = warns_col.find_one({"user_id": user_id, "chat_id": chat_id}) or {
+            "user_id": user_id,
+            "chat_id": chat_id,
+            "num_warns": 0,
+            "reasons": []
+        }
 
-        SESSION.add(warned_user)
-        SESSION.commit()
-        return warned_user.num_warns, warned_user.reasons
+        record["num_warns"] += 1
+        if reason:
+            record["reasons"].append(reason)
+
+        warns_col.replace_one({"user_id": user_id, "chat_id": chat_id}, record, upsert=True)
+        return record["num_warns"], record["reasons"]
 
 
 def remove_warn(user_id: int, chat_id: str) -> bool:
     with WARN_INSERTION_LOCK:
-        warned_user = SESSION.query(Warns).get((user_id, str(chat_id)))
-        if warned_user and warned_user.num_warns > 0:
-            warned_user.num_warns -= 1
-            SESSION.add(warned_user)
-            SESSION.commit()
+        record = warns_col.find_one({"user_id": user_id, "chat_id": chat_id})
+        if record and record["num_warns"] > 0:
+            record["num_warns"] -= 1
+            warns_col.replace_one({"user_id": user_id, "chat_id": chat_id}, record)
             return True
         return False
 
 
 def reset_warns(user_id: int, chat_id: str):
     with WARN_INSERTION_LOCK:
-        warned_user = SESSION.query(Warns).get((user_id, str(chat_id)))
-        if warned_user:
-            warned_user.num_warns = 0
-            warned_user.reasons = []
-            SESSION.add(warned_user)
-            SESSION.commit()
+        warns_col.update_one(
+            {"user_id": user_id, "chat_id": chat_id},
+            {"$set": {"num_warns": 0, "reasons": []}}
+        )
 
 
 def get_warns(user_id: int, chat_id: str) -> Optional[Tuple[int, List[str]]]:
-    try:
-        user = SESSION.query(Warns).get((user_id, str(chat_id)))
-        if not user:
-            return None
-        return user.num_warns, user.reasons
-    finally:
-        SESSION.close()
+    record = warns_col.find_one({"user_id": user_id, "chat_id": chat_id})
+    return (record["num_warns"], record["reasons"]) if record else None
 
 
 # Warn Filters
 def add_warn_filter(chat_id: str, keyword: str, reply: str):
     with WARN_FILTER_INSERTION_LOCK:
-        warn_filt = WarnFilters(chat_id, keyword, reply)
-        if keyword not in WARN_FILTERS.get(chat_id, []):
-            WARN_FILTERS.setdefault(chat_id, []).append(keyword)
-            WARN_FILTERS[chat_id] = sorted(WARN_FILTERS[chat_id], key=lambda x: (-len(x), x))
-
-        SESSION.merge(warn_filt)
-        SESSION.commit()
+        warn_filters_col.update_one(
+            {"chat_id": chat_id, "keyword": keyword},
+            {"$set": {"reply": reply}},
+            upsert=True
+        )
+        WARN_FILTERS.setdefault(chat_id, [])
+        if keyword not in WARN_FILTERS[chat_id]:
+            WARN_FILTERS[chat_id].append(keyword)
+            WARN_FILTERS[chat_id] = sorted(set(WARN_FILTERS[chat_id]), key=lambda x: (-len(x), x))
 
 
 def remove_warn_filter(chat_id: str, keyword: str) -> bool:
     with WARN_FILTER_INSERTION_LOCK:
-        warn_filt = SESSION.query(WarnFilters).get((chat_id, keyword))
-        if warn_filt:
-            if keyword in WARN_FILTERS.get(chat_id, []):
-                WARN_FILTERS[chat_id].remove(keyword)
-            SESSION.delete(warn_filt)
-            SESSION.commit()
+        result = warn_filters_col.delete_one({"chat_id": chat_id, "keyword": keyword})
+        if result.deleted_count:
+            WARN_FILTERS.get(chat_id, []).remove(keyword)
             return True
         return False
 
@@ -141,116 +85,79 @@ def get_chat_warn_triggers(chat_id: str) -> List[str]:
     return WARN_FILTERS.get(chat_id, [])
 
 
-def get_chat_warn_filters(chat_id: str) -> List[WarnFilters]:
-    try:
-        return SESSION.query(WarnFilters).filter_by(chat_id=chat_id).all()
-    finally:
-        SESSION.close()
+def get_chat_warn_filters(chat_id: str) -> List[dict]:
+    return list(warn_filters_col.find({"chat_id": chat_id}))
 
 
-def get_warn_filter(chat_id: str, keyword: str) -> Optional[WarnFilters]:
-    try:
-        return SESSION.query(WarnFilters).get((chat_id, keyword))
-    finally:
-        SESSION.close()
+def get_warn_filter(chat_id: str, keyword: str) -> Optional[dict]:
+    return warn_filters_col.find_one({"chat_id": chat_id, "keyword": keyword})
 
 
 # Settings
 def set_warn_limit(chat_id: str, warn_limit: int):
     with WARN_SETTINGS_LOCK:
-        setting = SESSION.query(WarnSettings).get(chat_id) or WarnSettings(chat_id, warn_limit=warn_limit)
-        setting.warn_limit = warn_limit
-        SESSION.add(setting)
-        SESSION.commit()
+        warn_settings_col.update_one(
+            {"chat_id": chat_id},
+            {"$set": {"warn_limit": warn_limit}},
+            upsert=True
+        )
 
 
 def set_warn_strength(chat_id: str, soft_warn: bool):
     with WARN_SETTINGS_LOCK:
-        setting = SESSION.query(WarnSettings).get(chat_id) or WarnSettings(chat_id, soft_warn=soft_warn)
-        setting.soft_warn = soft_warn
-        SESSION.add(setting)
-        SESSION.commit()
+        warn_settings_col.update_one(
+            {"chat_id": chat_id},
+            {"$set": {"soft_warn": soft_warn}},
+            upsert=True
+        )
 
 
 def get_warn_setting(chat_id: str) -> Tuple[int, bool]:
-    try:
-        setting = SESSION.query(WarnSettings).get(chat_id)
-        return (setting.warn_limit, setting.soft_warn) if setting else (3, False)
-    finally:
-        SESSION.close()
+    setting = warn_settings_col.find_one({"chat_id": chat_id})
+    return (setting.get("warn_limit", 3), setting.get("soft_warn", False)) if setting else (3, False)
 
 
 # Stats
 def num_warns() -> int:
-    try:
-        return SESSION.query(func.sum(Warns.num_warns)).scalar() or 0
-    finally:
-        SESSION.close()
+    result = warns_col.aggregate([{"$group": {"_id": None, "total": {"$sum": "$num_warns"}}}])
+    return next(result, {}).get("total", 0)
 
 
 def num_warn_chats() -> int:
-    try:
-        return SESSION.query(func.count(distinct(Warns.chat_id))).scalar()
-    finally:
-        SESSION.close()
+    return len(warns_col.distinct("chat_id"))
 
 
 def num_warn_filters() -> int:
-    try:
-        return SESSION.query(WarnFilters).count()
-    finally:
-        SESSION.close()
+    return warn_filters_col.count_documents({})
 
 
 def num_warn_chat_filters(chat_id: str) -> int:
-    try:
-        return SESSION.query(WarnFilters).filter_by(chat_id=chat_id).count()
-    finally:
-        SESSION.close()
+    return warn_filters_col.count_documents({"chat_id": chat_id})
 
 
 def num_warn_filter_chats() -> int:
-    try:
-        return SESSION.query(func.count(distinct(WarnFilters.chat_id))).scalar()
-    finally:
-        SESSION.close()
+    return len(warn_filters_col.distinct("chat_id"))
 
 
-# Migrations
+# Migration
 def migrate_chat(old_chat_id: str, new_chat_id: str):
     with WARN_INSERTION_LOCK:
-        for warn in SESSION.query(Warns).filter_by(chat_id=old_chat_id).all():
-            warn.chat_id = new_chat_id
-        SESSION.commit()
-
+        warns_col.update_many({"chat_id": old_chat_id}, {"$set": {"chat_id": new_chat_id}})
     with WARN_FILTER_INSERTION_LOCK:
-        for filt in SESSION.query(WarnFilters).filter_by(chat_id=old_chat_id).all():
-            filt.chat_id = new_chat_id
-        SESSION.commit()
+        warn_filters_col.update_many({"chat_id": old_chat_id}, {"$set": {"chat_id": new_chat_id}})
         if old_chat_id in WARN_FILTERS:
             WARN_FILTERS[new_chat_id] = WARN_FILTERS.pop(old_chat_id)
-
     with WARN_SETTINGS_LOCK:
-        for setting in SESSION.query(WarnSettings).filter_by(chat_id=old_chat_id).all():
-            setting.chat_id = new_chat_id
-        SESSION.commit()
+        warn_settings_col.update_many({"chat_id": old_chat_id}, {"$set": {"chat_id": new_chat_id}})
 
 
 # Initial Load
 def __load_chat_warn_filters():
     global WARN_FILTERS
-    try:
-        chats = SESSION.query(WarnFilters.chat_id).distinct().all()
-        for (chat_id,) in chats:
-            WARN_FILTERS[chat_id] = []
-
-        for filt in SESSION.query(WarnFilters).all():
-            WARN_FILTERS[filt.chat_id].append(filt.keyword)
-
-        for cid in WARN_FILTERS:
-            WARN_FILTERS[cid] = sorted(set(WARN_FILTERS[cid]), key=lambda i: (-len(i), i))
-    finally:
-        SESSION.close()
+    for filt in warn_filters_col.find():
+        WARN_FILTERS.setdefault(filt["chat_id"], []).append(filt["keyword"])
+    for cid in WARN_FILTERS:
+        WARN_FILTERS[cid] = sorted(set(WARN_FILTERS[cid]), key=lambda i: (-len(i), i))
 
 
 __load_chat_warn_filters()
