@@ -1,21 +1,21 @@
 import os
-from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import scoped_session, sessionmaker
+from pymongo import MongoClient
 
-# Path to SQLite DB file
-DB_PATH = os.path.join(os.path.dirname(__file__), "levi.sqlite3")
+# Get MongoDB URI from environment variable or fallback to local DB
+MONGO_URI = os.environ.get("MONGO_DB_URI", "mongodb://localhost:27017")
 
-# SQLAlchemy engine and base
-engine = create_engine(f"sqlite:///{DB_PATH}", echo=False)
-BASE = declarative_base()
+# Create a MongoDB client
+client = MongoClient(MONGO_URI)
 
-# Session factory
-session_factory = sessionmaker(bind=engine)
-SESSION = scoped_session(session_factory)
+# Choose the database (you can rename 'levi_bot' if needed)
+db = client["levi_bot"]
 
-# Import all model modules to register tables
-# IMPORTANT: Do not skip any
+# Exported DB object can be used in each module
+# Example use in another file: from sql import db
+# Then use: db["collection_name"].find_one(...)
+
+# Import all model modules to register usage
+# Ensure each module now uses: `from sql import db` to access the database
 import tg_bot.modules.sql.afk_sql
 import tg_bot.modules.sql.antiflood_sql
 import tg_bot.modules.sql.blacklist_sql
@@ -34,6 +34,3 @@ import tg_bot.modules.sql.userinfo_sql
 import tg_bot.modules.sql.users_sql
 import tg_bot.modules.sql.warns_sql
 import tg_bot.modules.sql.welcome_sql
-
-# Finally, create tables
-BASE.metadata.create_all(bind=engine)
