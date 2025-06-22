@@ -1,40 +1,9 @@
 import threading
-from sqlalchemy import Column, UnicodeText, Integer, String, Boolean
-from tg_bot.modules.sql import BASE, SESSION
+from sql import db
 
-
-class GloballyMutedUsers(BASE):
-    __tablename__ = "gmutes"
-
-    user_id = Column(Integer, primary_key=True)
-    name = Column(UnicodeText, nullable=False)
-    reason = Column(UnicodeText)
-
-    def __init__(self, user_id, name, reason=None):
-        self.user_id = user_id
-        self.name = name
-        self.reason = reason
-
-    def __repr__(self):
-        return f"<GMuted User {self.name} ({self.user_id})>"
-
-    def to_dict(self):
-        return {"user_id": self.user_id, "name": self.name, "reason": self.reason}
-
-
-class GmuteSettings(BASE):
-    __tablename__ = "gmute_settings"
-
-    chat_id = Column(String(14), primary_key=True)
-    setting = Column(Boolean, default=True, nullable=False)
-
-    def __init__(self, chat_id, enabled):
-        self.chat_id = str(chat_id)
-        self.setting = enabled
-
-    def __repr__(self):
-        return f"<Gmute setting {self.chat_id} ({self.setting})>"
-
+# MongoDB collections
+gmutes_collection = db["gmutes"]
+gmute_settings_collection = db["gmute_settings"]
 
 # Thread-safe locks
 GMUTED_USERS_LOCK = threading.RLock()
@@ -44,121 +13,98 @@ GMUTE_SETTING_LOCK = threading.RLock()
 GMUTED_LIST = set()
 GMUTESTAT_LIST = set()
 
-
+# ✅ Add or update a globally muted user
 def gmute_user(user_id, name, reason=None):
     with GMUTED_USERS_LOCK:
-        user = SESSION.query(GloballyMutedUsers).get(user_id)
-        if not user:
-            user = GloballyMutedUsers(user_id, name, reason)
-        else:
-            user.name = name
-            user.reason = reason
-
-        SESSION.merge(user)
-        SESSION.commit()
+        gmutes_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"name": name, "reason": reason}},
+            upsert=True
+        )
         __load_gmuted_userid_list()
 
-
+# ✅ Update only the reason
 def update_gmute_reason(user_id, name, reason=None):
     with GMUTED_USERS_LOCK:
-        user = SESSION.query(GloballyMutedUsers).get(user_id)
-        if not user:
+        result = gmutes_collection.find_one({"user_id": user_id})
+        if not result:
             return False
-
-        user.name = name
-        user.reason = reason
-
-        SESSION.merge(user)
-        SESSION.commit()
+        gmutes_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"name": name, "reason": reason}}
+        )
         return True
 
-
+# ✅ Remove a globally muted user
 def ungmute_user(user_id):
     with GMUTED_USERS_LOCK:
-        user = SESSION.query(GloballyMutedUsers).get(user_id)
-        if user:
-            SESSION.delete(user)
-        SESSION.commit()
+        gmutes_collection.delete_one({"user_id": user_id})
         __load_gmuted_userid_list()
 
-
+# ✅ Check if a user is globally muted
 def is_user_gmuted(user_id):
     return user_id in GMUTED_LIST
 
-
+# ✅ Get a specific gmute entry
 def get_gmuted_user(user_id):
-    try:
-        return SESSION.query(GloballyMutedUsers).get(user_id)
-    finally:
-        SESSION.close()
+    return gmutes_collection.find_one({"user_id": user_id})
 
-
+# ✅ Get full list of gmutes
 def get_gmute_list():
-    try:
-        return [x.to_dict() for x in SESSION.query(GloballyMutedUsers).all()]
-    finally:
-        SESSION.close()
+    return list(gmutes_collection.find({}, {"_id": 0}))
 
-
+# ✅ Enable gmutes for a chat
 def enable_gmutes(chat_id):
     with GMUTE_SETTING_LOCK:
-        chat = SESSION.query(GmuteSettings).get(str(chat_id))
-        if not chat:
-            chat = GmuteSettings(chat_id, True)
-
-        chat.setting = True
-        SESSION.add(chat)
-        SESSION.commit()
+        gmute_settings_collection.update_one(
+            {"chat_id": str(chat_id)},
+            {"$set": {"setting": True}},
+            upsert=True
+        )
         GMUTESTAT_LIST.discard(str(chat_id))
 
-
+# ✅ Disable gmutes for a chat
 def disable_gmutes(chat_id):
     with GMUTE_SETTING_LOCK:
-        chat = SESSION.query(GmuteSettings).get(str(chat_id))
-        if not chat:
-            chat = GmuteSettings(chat_id, False)
-
-        chat.setting = False
-        SESSION.add(chat)
-        SESSION.commit()
+        gmute_settings_collection.update_one(
+            {"chat_id": str(chat_id)},
+            {"$set": {"setting": False}},
+            upsert=True
+        )
         GMUTESTAT_LIST.add(str(chat_id))
 
-
+# ✅ Check if a chat honors gmutes
 def does_chat_gmute(chat_id):
     return str(chat_id) not in GMUTESTAT_LIST
 
-
+# ✅ Number of currently globally muted users
 def num_gmuted_users():
     return len(GMUTED_LIST)
 
-
-def __load_gmuted_userid_list():
-    global GMUTED_LIST
-    try:
-        GMUTED_LIST = {x.user_id for x in SESSION.query(GloballyMutedUsers).all()}
-    finally:
-        SESSION.close()
-
-
-def __load_gmute_stat_list():
-    global GMUTESTAT_LIST
-    try:
-        GMUTESTAT_LIST = {
-            x.chat_id for x in SESSION.query(GmuteSettings).all() if not x.setting
-        }
-    finally:
-        SESSION.close()
-
-
+# ✅ Migration of gmute setting to new chat ID
 def migrate_chat(old_chat_id, new_chat_id):
     with GMUTE_SETTING_LOCK:
-        chat = SESSION.query(GmuteSettings).get(str(old_chat_id))
-        if chat:
-            chat.chat_id = str(new_chat_id)
-            SESSION.add(chat)
-        SESSION.commit()
+        old = gmute_settings_collection.find_one({"chat_id": str(old_chat_id)})
+        if old:
+            gmute_settings_collection.update_one(
+                {"chat_id": str(new_chat_id)},
+                {"$set": {"setting": old.get("setting", True)}},
+                upsert=True
+            )
+            gmute_settings_collection.delete_one({"chat_id": str(old_chat_id)})
 
+# ✅ Load gmutes into memory
+def __load_gmuted_userid_list():
+    global GMUTED_LIST
+    GMUTED_LIST = {x["user_id"] for x in gmutes_collection.find({}, {"user_id": 1})}
 
-# Cache data at startup
+# ✅ Load chats where gmutes are disabled
+def __load_gmute_stat_list():
+    global GMUTESTAT_LIST
+    GMUTESTAT_LIST = {
+        x["chat_id"] for x in gmute_settings_collection.find({"setting": False}, {"chat_id": 1})
+    }
+
+# ✅ Initialize on startup
 __load_gmuted_userid_list()
 __load_gmute_stat_list()
