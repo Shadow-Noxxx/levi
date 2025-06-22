@@ -1,81 +1,44 @@
 import threading
+from sql import db
 
-from sqlalchemy import Column, UnicodeText, Boolean, Integer
-
-from tg_bot.modules.sql import BASE, SESSION
-
-
-class AFK(BASE):
-    __tablename__ = "afk_users"
-
-    user_id = Column(Integer, primary_key=True)
-    is_afk = Column(Boolean)
-    reason = Column(UnicodeText)
-
-    def __init__(self, user_id, reason="", is_afk=True):
-        self.user_id = user_id
-        self.reason = reason
-        self.is_afk = is_afk
-
-    def __repr__(self):
-        return "afk_status for {}".format(self.user_id)
-
-
-# ✅ Create the table if it doesn't exist
-AFK.__table__.create(checkfirst=True)
-
+# Use MongoDB collection
+afk_collection = db["afk_users"]
 
 INSERTION_LOCK = threading.RLock()
 AFK_USERS = {}
 
-
+# ✅ Check if user is AFK (in-memory check)
 def is_afk(user_id):
     return user_id in AFK_USERS
 
-
+# ✅ Check status and reason
 def check_afk_status(user_id):
     if user_id in AFK_USERS:
         return True, AFK_USERS[user_id]
     return False, ""
 
-
+# ✅ Set user AFK
 def set_afk(user_id, reason=""):
     with INSERTION_LOCK:
-        curr = SESSION.query(AFK).get(user_id)
-        if not curr:
-            curr = AFK(user_id, reason, True)
-        else:
-            curr.is_afk = True
-            curr.reason = reason
-
+        afk_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"is_afk": True, "reason": reason}},
+            upsert=True,
+        )
         AFK_USERS[user_id] = reason
 
-        SESSION.add(curr)
-        SESSION.commit()
-
-
+# ✅ Remove AFK status
 def rm_afk(user_id):
     with INSERTION_LOCK:
-        curr = SESSION.query(AFK).get(user_id)
-        if curr:
-            if user_id in AFK_USERS:
-                del AFK_USERS[user_id]
+        result = afk_collection.delete_one({"user_id": user_id})
+        if user_id in AFK_USERS:
+            del AFK_USERS[user_id]
+        return result.deleted_count > 0
 
-            SESSION.delete(curr)
-            SESSION.commit()
-            return True
-
-        SESSION.close()
-        return False
-
-
+# ✅ Load existing AFK users into memory on startup
 def __load_afk_users():
     global AFK_USERS
-    try:
-        all_afk = SESSION.query(AFK).all()
-        AFK_USERS = {user.user_id: user.reason for user in all_afk if user.is_afk}
-    finally:
-        SESSION.close()
-
+    afk_data = afk_collection.find({"is_afk": True})
+    AFK_USERS = {entry["user_id"]: entry.get("reason", "") for entry in afk_data}
 
 __load_afk_users()
