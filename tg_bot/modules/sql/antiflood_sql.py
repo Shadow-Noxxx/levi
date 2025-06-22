@@ -1,47 +1,27 @@
 import threading
+from sql import db
 
-from sqlalchemy import Column, Integer, String
-
-from tg_bot.modules.sql import BASE, SESSION
+# MongoDB collection
+flood_collection = db["antiflood"]
 
 DEF_COUNT = 0
 DEF_LIMIT = 0
 DEF_OBJ = (None, DEF_COUNT, DEF_LIMIT)
 
-
-class FloodControl(BASE):
-    __tablename__ = "antiflood"
-    chat_id = Column(String(14), primary_key=True)
-    user_id = Column(Integer)
-    count = Column(Integer, default=DEF_COUNT)
-    limit = Column(Integer, default=DEF_LIMIT)
-
-    def __init__(self, chat_id):
-        self.chat_id = str(chat_id)  # ensure string
-
-    def __repr__(self):
-        return "<flood control for %s>" % self.chat_id
-
-
 INSERTION_LOCK = threading.RLock()
 CHAT_FLOOD = {}
 
-
+# ✅ Set flood limit for a chat
 def set_flood(chat_id, amount):
     with INSERTION_LOCK:
-        flood = SESSION.query(FloodControl).get(str(chat_id))
-        if not flood:
-            flood = FloodControl(str(chat_id))
-
-        flood.user_id = None
-        flood.limit = amount
-
+        flood_collection.update_one(
+            {"chat_id": str(chat_id)},
+            {"$set": {"user_id": None, "limit": amount}},
+            upsert=True,
+        )
         CHAT_FLOOD[str(chat_id)] = (None, DEF_COUNT, amount)
 
-        SESSION.add(flood)
-        SESSION.commit()
-
-
+# ✅ Check/update message count, return True if flood threshold exceeded
 def update_flood(chat_id: str, user_id) -> bool:
     if str(chat_id) in CHAT_FLOOD:
         curr_user_id, count, limit = CHAT_FLOOD.get(str(chat_id), DEF_OBJ)
@@ -61,29 +41,29 @@ def update_flood(chat_id: str, user_id) -> bool:
         CHAT_FLOOD[str(chat_id)] = (user_id, count, limit)
         return False
 
-
+# ✅ Get flood limit for a chat
 def get_flood_limit(chat_id):
     return CHAT_FLOOD.get(str(chat_id), DEF_OBJ)[2]
 
-
+# ✅ Migrate chat ID (e.g., after group ID change)
 def migrate_chat(old_chat_id, new_chat_id):
     with INSERTION_LOCK:
-        flood = SESSION.query(FloodControl).get(str(old_chat_id))
-        if flood:
+        data = flood_collection.find_one({"chat_id": str(old_chat_id)})
+        if data:
+            flood_collection.update_one(
+                {"chat_id": str(new_chat_id)},
+                {"$set": {"limit": data.get("limit", DEF_LIMIT), "user_id": None}},
+                upsert=True
+            )
             CHAT_FLOOD[str(new_chat_id)] = CHAT_FLOOD.get(str(old_chat_id), DEF_OBJ)
-            flood.chat_id = str(new_chat_id)
-            SESSION.commit()
 
-        SESSION.close()
-
-
+# ✅ Load all flood configs into memory
 def __load_flood_settings():
     global CHAT_FLOOD
-    try:
-        all_chats = SESSION.query(FloodControl).all()
-        CHAT_FLOOD = {chat.chat_id: (None, DEF_COUNT, chat.limit) for chat in all_chats}
-    finally:
-        SESSION.close()
-
+    all_chats = flood_collection.find()
+    CHAT_FLOOD = {
+        chat["chat_id"]: (None, DEF_COUNT, chat.get("limit", DEF_LIMIT))
+        for chat in all_chats
+    }
 
 __load_flood_settings()
