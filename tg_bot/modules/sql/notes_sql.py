@@ -1,47 +1,10 @@
 import threading
-from sqlalchemy import Column, String, Boolean, UnicodeText, Integer, func, distinct
-
+from pymongo import ASCENDING
 from tg_bot.modules.helper_funcs.msg_types import Types
-from tg_bot.modules.sql import SESSION, BASE
+from sql import db
 
-
-class Notes(BASE):
-    __tablename__ = "notes"
-    chat_id = Column(String(14), primary_key=True)
-    name = Column(UnicodeText, primary_key=True)
-    value = Column(UnicodeText, nullable=False)
-    file = Column(UnicodeText)
-    is_reply = Column(Boolean, default=False)
-    has_buttons = Column(Boolean, default=False)
-    msgtype = Column(Integer, default=Types.BUTTON_TEXT.value)
-
-    def __init__(self, chat_id, name, value, msgtype, file=None):
-        self.chat_id = str(chat_id)
-        self.name = name
-        self.value = value
-        self.msgtype = msgtype
-        self.file = file
-
-    def __repr__(self):
-        return f"<Note {self.name}>"
-
-
-class Buttons(BASE):
-    __tablename__ = "note_urls"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    chat_id = Column(String(14), primary_key=True)
-    note_name = Column(UnicodeText, primary_key=True)
-    name = Column(UnicodeText, nullable=False)
-    url = Column(UnicodeText, nullable=False)
-    same_line = Column(Boolean, default=False)
-
-    def __init__(self, chat_id, note_name, name, url, same_line=False):
-        self.chat_id = str(chat_id)
-        self.note_name = note_name
-        self.name = name
-        self.url = url
-        self.same_line = same_line
-
+notes_collection = db["notes"]
+buttons_collection = db["note_buttons"]
 
 NOTES_LOCK = threading.RLock()
 BUTTONS_LOCK = threading.RLock()
@@ -49,107 +12,84 @@ BUTTONS_LOCK = threading.RLock()
 
 def add_note_to_db(chat_id, note_name, note_data, msgtype, buttons=None, file=None):
     buttons = buttons or []
+    chat_id = str(chat_id)
 
     with NOTES_LOCK:
-        prev = SESSION.query(Notes).get((str(chat_id), note_name))
-        if prev:
-            with BUTTONS_LOCK:
-                old_buttons = SESSION.query(Buttons).filter(
-                    Buttons.chat_id == str(chat_id),
-                    Buttons.note_name == note_name
-                ).all()
-                for btn in old_buttons:
-                    SESSION.delete(btn)
-            SESSION.delete(prev)
+        notes_collection.delete_one({"chat_id": chat_id, "name": note_name})
+        buttons_collection.delete_many({"chat_id": chat_id, "note_name": note_name})
 
-        note = Notes(chat_id, note_name, note_data or "", msgtype.value, file)
-        SESSION.add(note)
-        SESSION.commit()
+        notes_collection.insert_one({
+            "chat_id": chat_id,
+            "name": note_name,
+            "value": note_data or "",
+            "file": file,
+            "msgtype": msgtype.value,
+            "is_reply": False,
+            "has_buttons": bool(buttons)
+        })
 
     for b_name, url, same_line in buttons:
         add_note_button_to_db(chat_id, note_name, b_name, url, same_line)
 
 
 def get_note(chat_id, note_name):
-    try:
-        return SESSION.query(Notes).get((str(chat_id), note_name))
-    finally:
-        SESSION.close()
+    return notes_collection.find_one({"chat_id": str(chat_id), "name": note_name})
 
 
 def rm_note(chat_id, note_name):
+    chat_id = str(chat_id)
     with NOTES_LOCK:
-        note = SESSION.query(Notes).get((str(chat_id), note_name))
+        note = notes_collection.find_one({"chat_id": chat_id, "name": note_name})
         if note:
-            with BUTTONS_LOCK:
-                buttons = SESSION.query(Buttons).filter(
-                    Buttons.chat_id == str(chat_id),
-                    Buttons.note_name == note_name
-                ).all()
-                for btn in buttons:
-                    SESSION.delete(btn)
-
-            SESSION.delete(note)
-            SESSION.commit()
+            buttons_collection.delete_many({"chat_id": chat_id, "note_name": note_name})
+            notes_collection.delete_one({"chat_id": chat_id, "name": note_name})
             return True
-        else:
-            SESSION.close()
-            return False
+        return False
 
 
 def get_all_chat_notes(chat_id):
-    try:
-        return SESSION.query(Notes).filter(
-            Notes.chat_id == str(chat_id)
-        ).order_by(Notes.name.asc()).all()
-    finally:
-        SESSION.close()
+    return list(notes_collection.find({"chat_id": str(chat_id)}).sort("name", ASCENDING))
 
 
 def add_note_button_to_db(chat_id, note_name, b_name, url, same_line):
     with BUTTONS_LOCK:
-        button = Buttons(chat_id, note_name, b_name, url, same_line)
-        SESSION.add(button)
-        SESSION.commit()
+        buttons_collection.insert_one({
+            "chat_id": str(chat_id),
+            "note_name": note_name,
+            "name": b_name,
+            "url": url,
+            "same_line": same_line
+        })
 
 
 def get_buttons(chat_id, note_name):
-    try:
-        return SESSION.query(Buttons).filter(
-            Buttons.chat_id == str(chat_id),
-            Buttons.note_name == note_name
-        ).order_by(Buttons.id).all()
-    finally:
-        SESSION.close()
+    return list(buttons_collection.find(
+        {"chat_id": str(chat_id), "note_name": note_name}
+    ).sort("_id", ASCENDING))
 
 
 def num_notes():
-    try:
-        return SESSION.query(Notes).count()
-    finally:
-        SESSION.close()
+    return notes_collection.count_documents({})
 
 
 def num_chats():
-    try:
-        return SESSION.query(func.count(distinct(Notes.chat_id))).scalar()
-    finally:
-        SESSION.close()
+    return len(notes_collection.distinct("chat_id"))
 
 
 def migrate_chat(old_chat_id, new_chat_id):
+    old_chat_id = str(old_chat_id)
+    new_chat_id = str(new_chat_id)
+
     with NOTES_LOCK:
-        chat_notes = SESSION.query(Notes).filter(
-            Notes.chat_id == str(old_chat_id)
-        ).all()
-        for note in chat_notes:
-            note.chat_id = str(new_chat_id)
+        notes = list(notes_collection.find({"chat_id": old_chat_id}))
+        for note in notes:
+            note["chat_id"] = new_chat_id
+            notes_collection.insert_one(note)
+        notes_collection.delete_many({"chat_id": old_chat_id})
 
-        with BUTTONS_LOCK:
-            chat_buttons = SESSION.query(Buttons).filter(
-                Buttons.chat_id == str(old_chat_id)
-            ).all()
-            for btn in chat_buttons:
-                btn.chat_id = str(new_chat_id)
-
-        SESSION.commit()
+    with BUTTONS_LOCK:
+        buttons = list(buttons_collection.find({"chat_id": old_chat_id}))
+        for btn in buttons:
+            btn["chat_id"] = new_chat_id
+            buttons_collection.insert_one(btn)
+        buttons_collection.delete_many({"chat_id": old_chat_id})
