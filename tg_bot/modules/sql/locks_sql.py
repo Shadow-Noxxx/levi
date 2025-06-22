@@ -1,137 +1,129 @@
 import threading
-from sqlalchemy import Column, String, Boolean
-from tg_bot.modules.sql import SESSION, BASE
+from sql import db
 
-class Permissions(BASE):
-    __tablename__ = "permissions"
-    chat_id = Column(String(14), primary_key=True)
-    # Booleans mean "is locked"
-    audio = Column(Boolean, default=False)
-    voice = Column(Boolean, default=False)
-    contact = Column(Boolean, default=False)
-    video = Column(Boolean, default=False)
-    videonote = Column(Boolean, default=False)
-    document = Column(Boolean, default=False)
-    photo = Column(Boolean, default=False)
-    sticker = Column(Boolean, default=False)
-    gif = Column(Boolean, default=False)
-    url = Column(Boolean, default=False)
-    bots = Column(Boolean, default=False)
-    forward = Column(Boolean, default=False)
-    game = Column(Boolean, default=False)
-    location = Column(Boolean, default=False)
+# MongoDB collections
+perm_collection = db["permissions"]
+restr_collection = db["restrictions"]
 
-    def __init__(self, chat_id):
-        self.chat_id = str(chat_id)
-
-
-class Restrictions(BASE):
-    __tablename__ = "restrictions"
-    chat_id = Column(String(14), primary_key=True)
-    messages = Column(Boolean, default=False)
-    media = Column(Boolean, default=False)
-    other = Column(Boolean, default=False)
-    preview = Column(Boolean, default=False)
-
-    def __init__(self, chat_id):
-        self.chat_id = str(chat_id)
-
-
+# Locks
 PERM_LOCK = threading.RLock()
 RESTR_LOCK = threading.RLock()
 
 
 def init_permissions(chat_id, reset=False):
-    curr = SESSION.query(Permissions).get(str(chat_id))
-    if reset and curr:
-        SESSION.delete(curr)
-        SESSION.flush()
-    new_perm = Permissions(chat_id)
-    SESSION.add(new_perm)
-    SESSION.commit()
-    return new_perm
+    chat_id = str(chat_id)
+    with PERM_LOCK:
+        if reset:
+            perm_collection.delete_one({"chat_id": chat_id})
+        default_perms = {
+            "chat_id": chat_id,
+            "audio": False,
+            "voice": False,
+            "contact": False,
+            "video": False,
+            "videonote": False,
+            "document": False,
+            "photo": False,
+            "sticker": False,
+            "gif": False,
+            "url": False,
+            "bots": False,
+            "forward": False,
+            "game": False,
+            "location": False
+        }
+        perm_collection.update_one({"chat_id": chat_id}, {"$setOnInsert": default_perms}, upsert=True)
+        return perm_collection.find_one({"chat_id": chat_id})
 
 
 def init_restrictions(chat_id, reset=False):
-    curr = SESSION.query(Restrictions).get(str(chat_id))
-    if reset and curr:
-        SESSION.delete(curr)
-        SESSION.flush()
-    new_restr = Restrictions(chat_id)
-    SESSION.add(new_restr)
-    SESSION.commit()
-    return new_restr
+    chat_id = str(chat_id)
+    with RESTR_LOCK:
+        if reset:
+            restr_collection.delete_one({"chat_id": chat_id})
+        default_restr = {
+            "chat_id": chat_id,
+            "messages": False,
+            "media": False,
+            "other": False,
+            "preview": False
+        }
+        restr_collection.update_one({"chat_id": chat_id}, {"$setOnInsert": default_restr}, upsert=True)
+        return restr_collection.find_one({"chat_id": chat_id})
 
 
 def update_lock(chat_id, lock_type, locked):
+    chat_id = str(chat_id)
     with PERM_LOCK:
-        curr = SESSION.query(Permissions).get(str(chat_id))
-        if not curr:
-            curr = init_permissions(chat_id)
-        setattr(curr, lock_type, locked)
-        SESSION.commit()
+        perm_collection.update_one(
+            {"chat_id": chat_id},
+            {"$set": {lock_type: locked}},
+            upsert=True
+        )
 
 
 def update_restriction(chat_id, restr_type, locked):
+    chat_id = str(chat_id)
     with RESTR_LOCK:
-        curr = SESSION.query(Restrictions).get(str(chat_id))
-        if not curr:
-            curr = init_restrictions(chat_id)
-
         if restr_type == "all":
-            curr.messages = curr.media = curr.other = curr.preview = locked
+            restr_collection.update_one(
+                {"chat_id": chat_id},
+                {"$set": {
+                    "messages": locked,
+                    "media": locked,
+                    "other": locked,
+                    "preview": locked
+                }},
+                upsert=True
+            )
         else:
             if restr_type == "previews":
                 restr_type = "preview"
-            setattr(curr, restr_type, locked)
-
-        SESSION.commit()
+            restr_collection.update_one(
+                {"chat_id": chat_id},
+                {"$set": {restr_type: locked}},
+                upsert=True
+            )
 
 
 def is_locked(chat_id, lock_type):
-    curr = SESSION.query(Permissions).get(str(chat_id))
-    result = getattr(curr, lock_type, False) if curr else False
-    SESSION.close()
-    return result
+    data = perm_collection.find_one({"chat_id": str(chat_id)}, {lock_type: 1})
+    return data.get(lock_type, False) if data else False
 
 
 def is_restr_locked(chat_id, lock_type):
-    curr = SESSION.query(Restrictions).get(str(chat_id))
-    result = False
-    if curr:
-        if lock_type == "all":
-            result = curr.messages and curr.media and curr.other and curr.preview
-        elif lock_type == "previews":
-            result = curr.preview
-        else:
-            result = getattr(curr, lock_type, False)
-    SESSION.close()
-    return result
+    data = restr_collection.find_one({"chat_id": str(chat_id)})
+    if not data:
+        return False
+
+    if lock_type == "all":
+        return data.get("messages") and data.get("media") and data.get("other") and data.get("preview")
+    elif lock_type == "previews":
+        return data.get("preview", False)
+    else:
+        return data.get(lock_type, False)
 
 
 def get_locks(chat_id):
-    try:
-        return SESSION.query(Permissions).get(str(chat_id))
-    finally:
-        SESSION.close()
+    return perm_collection.find_one({"chat_id": str(chat_id)})
 
 
 def get_restr(chat_id):
-    try:
-        return SESSION.query(Restrictions).get(str(chat_id))
-    finally:
-        SESSION.close()
+    return restr_collection.find_one({"chat_id": str(chat_id)})
 
 
 def migrate_chat(old_chat_id, new_chat_id):
+    old_chat_id, new_chat_id = str(old_chat_id), str(new_chat_id)
     with PERM_LOCK:
-        perms = SESSION.query(Permissions).get(str(old_chat_id))
-        if perms:
-            perms.chat_id = str(new_chat_id)
-        SESSION.commit()
+        old_perm = perm_collection.find_one({"chat_id": old_chat_id})
+        if old_perm:
+            old_perm["chat_id"] = new_chat_id
+            perm_collection.insert_one(old_perm)
+            perm_collection.delete_one({"chat_id": old_chat_id})
 
     with RESTR_LOCK:
-        rest = SESSION.query(Restrictions).get(str(old_chat_id))
-        if rest:
-            rest.chat_id = str(new_chat_id)
-        SESSION.commit()
+        old_restr = restr_collection.find_one({"chat_id": old_chat_id})
+        if old_restr:
+            old_restr["chat_id"] = new_chat_id
+            restr_collection.insert_one(old_restr)
+            restr_collection.delete_one({"chat_id": old_chat_id})
