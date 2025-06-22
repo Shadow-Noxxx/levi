@@ -1,70 +1,42 @@
 import threading
-from typing import List
+from typing import List, Dict
 
-from sqlalchemy import Column, UnicodeText, Integer
+from bson.objectid import ObjectId
+from sql import db
 
-from tg_bot.modules.sql import BASE, SESSION
-
-
-class RSS(BASE):
-    __tablename__ = "rss_feed"
-
-    id = Column(Integer, primary_key=True)
-    chat_id = Column(UnicodeText, nullable=False)
-    feed_link = Column(UnicodeText)
-    old_entry_link = Column(UnicodeText)
-
-    def __init__(self, chat_id: str, feed_link: str, old_entry_link: str):
-        self.chat_id = chat_id
-        self.feed_link = feed_link
-        self.old_entry_link = old_entry_link
-
-    def __repr__(self):
-        return f"<RSS chat_id={self.chat_id} feed={self.feed_link} old={self.old_entry_link}>"
-
-
+rss_collection = db["rss_feed"]
 INSERTION_LOCK = threading.RLock()
 
 
-def check_url_availability(chat_id: str, feed_link: str) -> List[RSS]:
-    try:
-        return SESSION.query(RSS).filter_by(chat_id=chat_id, feed_link=feed_link).all()
-    finally:
-        SESSION.close()
+def check_url_availability(chat_id: str, feed_link: str) -> List[Dict]:
+    return list(rss_collection.find({"chat_id": chat_id, "feed_link": feed_link}))
 
 
 def add_url(chat_id: str, feed_link: str, old_entry_link: str):
     with INSERTION_LOCK:
-        entry = RSS(chat_id, feed_link, old_entry_link)
-        SESSION.add(entry)
-        SESSION.commit()
+        rss_collection.insert_one({
+            "chat_id": chat_id,
+            "feed_link": feed_link,
+            "old_entry_link": old_entry_link
+        })
 
 
 def remove_url(chat_id: str, feed_link: str):
     with INSERTION_LOCK:
-        rows = check_url_availability(chat_id, feed_link)
-        for row in rows:
-            SESSION.delete(row)
-        SESSION.commit()
+        rss_collection.delete_many({"chat_id": chat_id, "feed_link": feed_link})
 
 
-def get_urls(chat_id: str) -> List[RSS]:
-    try:
-        return SESSION.query(RSS).filter_by(chat_id=chat_id).all()
-    finally:
-        SESSION.close()
+def get_urls(chat_id: str) -> List[Dict]:
+    return list(rss_collection.find({"chat_id": chat_id}))
 
 
-def get_all() -> List[RSS]:
-    try:
-        return SESSION.query(RSS).all()
-    finally:
-        SESSION.close()
+def get_all() -> List[Dict]:
+    return list(rss_collection.find({}))
 
 
-def update_url(row_id: int, new_entry_link: str):
+def update_url(row_id: str, new_entry_link: str):
     with INSERTION_LOCK:
-        row = SESSION.query(RSS).get(row_id)
-        if row:
-            row.old_entry_link = new_entry_link
-            SESSION.commit()
+        rss_collection.update_one(
+            {"_id": ObjectId(row_id)},
+            {"$set": {"old_entry_link": new_entry_link}}
+        )
