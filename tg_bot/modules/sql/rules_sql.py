@@ -1,61 +1,43 @@
 import threading
 from typing import Optional, Union
 
-from sqlalchemy import Column, String, UnicodeText, func, distinct
+from pymongo import ASCENDING
+from sql import db
 
-from tg_bot.modules.sql import SESSION, BASE
-
-
-class Rules(BASE):
-    __tablename__ = "rules"
-
-    chat_id = Column(String(14), primary_key=True)
-    rules = Column(UnicodeText, default="")
-
-    def __init__(self, chat_id: Union[int, str]):
-        self.chat_id = str(chat_id)
-
-    def __repr__(self):
-        return f"<Rules chat_id={self.chat_id} rules={self.rules[:30]}...>"
-
-
+rules_collection = db["rules"]
 INSERTION_LOCK = threading.RLock()
 
 
 def set_rules(chat_id: Union[int, str], rules_text: str):
     with INSERTION_LOCK:
         chat_id = str(chat_id)
-        record = SESSION.query(Rules).get(chat_id)
-        if not record:
-            record = Rules(chat_id)
-
-        record.rules = rules_text
-        SESSION.add(record)
-        SESSION.commit()
+        rules_collection.update_one(
+            {"chat_id": chat_id},
+            {"$set": {"rules": rules_text}},
+            upsert=True
+        )
 
 
 def get_rules(chat_id: Union[int, str]) -> Optional[str]:
-    try:
-        chat_id = str(chat_id)
-        record = SESSION.query(Rules).get(chat_id)
-        return record.rules if record else None
-    finally:
-        SESSION.close()
+    chat_id = str(chat_id)
+    doc = rules_collection.find_one({"chat_id": chat_id})
+    return doc["rules"] if doc else None
 
 
 def num_chats() -> int:
-    try:
-        return SESSION.query(func.count(distinct(Rules.chat_id))).scalar()
-    finally:
-        SESSION.close()
+    return rules_collection.count_documents({})
 
 
 def migrate_chat(old_chat_id: Union[int, str], new_chat_id: Union[int, str]):
     with INSERTION_LOCK:
-        record = SESSION.query(Rules).get(str(old_chat_id))
-        if record:
-            # Avoid PK conflict if new_chat_id already exists
-            SESSION.query(Rules).filter_by(chat_id=str(new_chat_id)).delete()
+        old_id, new_id = str(old_chat_id), str(new_chat_id)
 
-            record.chat_id = str(new_chat_id)
-            SESSION.commit()
+        record = rules_collection.find_one({"chat_id": old_id})
+        if record:
+            # Replace if the new_chat_id already exists
+            rules_collection.replace_one(
+                {"chat_id": new_id},
+                {"chat_id": new_id, "rules": record["rules"]},
+                upsert=True
+            )
+            rules_collection.delete_one({"chat_id": old_id})
