@@ -1,131 +1,116 @@
 import threading
-from sqlalchemy import Column, String, UnicodeText, Integer, Boolean
-from tg_bot.modules.sql import BASE, SESSION
+from sql import db
 
-
-class CustomFilters(BASE):
-    __tablename__ = "cust_filters"
-
-    chat_id = Column(String(14), primary_key=True)
-    name = Column(String(100), primary_key=True)
-    keyword = Column(UnicodeText)
-
-    def __init__(self, chat_id, name, keyword):
-        self.chat_id = str(chat_id)
-        self.name = name
-        self.keyword = keyword
-
-
-class Buttons(BASE):
-    __tablename__ = "cust_buttons"
-
-    chat_id = Column(String(14), primary_key=True)
-    keyword = Column(UnicodeText, primary_key=True)
-    name = Column(String(32), primary_key=True)
-    url = Column(UnicodeText)
-    same_line = Column(Boolean, default=True)
-
-    def __init__(self, chat_id, keyword, name, url, same_line=True):
-        self.chat_id = str(chat_id)
-        self.keyword = keyword
-        self.name = name
-        self.url = url
-        self.same_line = same_line
-
+# MongoDB collections
+filters_collection = db["cust_filters"]
+buttons_collection = db["cust_buttons"]
 
 CUST_FILT_LOCK = threading.RLock()
-CHAT_FILTERS = {}
-
 BUTTON_LOCK = threading.RLock()
+
+CHAT_FILTERS = {}
 BTN = {}
 
-
+# ✅ Add a custom filter
 def add_filter(chat_id, keyword, reply):
     with CUST_FILT_LOCK:
-        filt = CustomFilters(str(chat_id), keyword, reply)
-        SESSION.merge(filt)
-        SESSION.commit()
+        filters_collection.update_one(
+            {"chat_id": str(chat_id), "name": keyword},
+            {"$set": {"keyword": reply}},
+            upsert=True,
+        )
         CHAT_FILTERS.setdefault(str(chat_id), {})[keyword] = reply
 
-
+# ✅ Remove a custom filter
 def remove_filter(chat_id, keyword):
     with CUST_FILT_LOCK:
-        filt = SESSION.query(CustomFilters).get((str(chat_id), keyword))
-        if filt:
-            if keyword in CHAT_FILTERS.get(str(chat_id), {}):
-                del CHAT_FILTERS[str(chat_id)][keyword]
-            SESSION.delete(filt)
-            SESSION.commit()
+        result = filters_collection.delete_one({"chat_id": str(chat_id), "name": keyword})
+        if result.deleted_count:
+            CHAT_FILTERS.get(str(chat_id), {}).pop(keyword, None)
             return True
-        SESSION.close()
         return False
 
-
+# ✅ Get a specific filter
 def get_filter(chat_id, keyword):
     return CHAT_FILTERS.get(str(chat_id), {}).get(keyword)
 
-
+# ✅ Get all filters in a chat
 def get_chat_filters(chat_id):
     return CHAT_FILTERS.get(str(chat_id), {})
 
-
+# ✅ Add a button to a filter
 def add_button(chat_id, keyword, name, url, same_line=True):
     with BUTTON_LOCK:
-        btn = Buttons(str(chat_id), keyword, name, url, same_line)
-        SESSION.merge(btn)
-        SESSION.commit()
+        buttons_collection.update_one(
+            {"chat_id": str(chat_id), "keyword": keyword, "name": name},
+            {"$set": {"url": url, "same_line": same_line}},
+            upsert=True
+        )
         BTN.setdefault(str(chat_id), {}).setdefault(keyword, []).append((name, url, same_line))
 
-
+# ✅ Get buttons for a specific filter
 def get_buttons(chat_id, keyword):
     return BTN.get(str(chat_id), {}).get(keyword, [])
 
-
+# ✅ Delete all buttons for a specific keyword
 def delete_button(chat_id, keyword):
     with BUTTON_LOCK:
-        btns = SESSION.query(Buttons).filter(Buttons.chat_id == str(chat_id), Buttons.keyword == keyword).all()
-        for btn in btns:
-            SESSION.delete(btn)
-        SESSION.commit()
-        if chat_id in BTN and keyword in BTN[chat_id]:
-            del BTN[chat_id][keyword]
+        buttons_collection.delete_many({"chat_id": str(chat_id), "keyword": keyword})
+        if str(chat_id) in BTN and keyword in BTN[str(chat_id)]:
+            del BTN[str(chat_id)][keyword]
 
-
+# ✅ Get all filters in DB
 def get_all_filters():
-    try:
-        return SESSION.query(CustomFilters).all()
-    finally:
-        SESSION.close()
+    return list(filters_collection.find())
 
-
+# ✅ Load filters and buttons into memory on startup
 def __load_chat_filters():
     global CHAT_FILTERS, BTN
-    try:
-        all_filters = SESSION.query(CustomFilters).all()
-        for filt in all_filters:
-            CHAT_FILTERS.setdefault(filt.chat_id, {})[filt.name] = filt.keyword
 
-        all_btns = SESSION.query(Buttons).all()
-        for btn in all_btns:
-            BTN.setdefault(btn.chat_id, {}).setdefault(btn.keyword, []).append((btn.name, btn.url, btn.same_line))
-    finally:
-        SESSION.close()
+    all_filters = filters_collection.find()
+    for filt in all_filters:
+        CHAT_FILTERS.setdefault(filt["chat_id"], {})[filt["name"]] = filt["keyword"]
 
+    all_btns = buttons_collection.find()
+    for btn in all_btns:
+        BTN.setdefault(btn["chat_id"], {}).setdefault(btn["keyword"], []).append(
+            (btn["name"], btn["url"], btn.get("same_line", True))
+        )
 
+# ✅ Migrate filter and button data from old chat to new chat
 def migrate_chat(old_chat_id, new_chat_id):
+    old_id = str(old_chat_id)
+    new_id = str(new_chat_id)
+
     with CUST_FILT_LOCK:
-        chat_filters = SESSION.query(CustomFilters).filter(CustomFilters.chat_id == str(old_chat_id)).all()
-        for filt in chat_filters:
-            filt.chat_id = str(new_chat_id)
-        SESSION.commit()
-        CHAT_FILTERS[str(new_chat_id)] = CHAT_FILTERS[str(old_chat_id)]
-        del CHAT_FILTERS[str(old_chat_id)]
+        filters = filters_collection.find({"chat_id": old_id})
+        for filt in filters:
+            filters_collection.update_one(
+                {"chat_id": new_id, "name": filt["name"]},
+                {"$set": {"keyword": filt["keyword"]}},
+                upsert=True
+            )
+        filters_collection.delete_many({"chat_id": old_id})
 
-        with BUTTON_LOCK:
-            chat_buttons = SESSION.query(Buttons).filter(Buttons.chat_id == str(old_chat_id)).all()
-            for btn in chat_buttons:
-                btn.chat_id = str(new_chat_id)
-            SESSION.commit()
+        CHAT_FILTERS[new_id] = CHAT_FILTERS.get(old_id, {})
+        if old_id in CHAT_FILTERS:
+            del CHAT_FILTERS[old_id]
 
+    with BUTTON_LOCK:
+        buttons = buttons_collection.find({"chat_id": old_id})
+        for btn in buttons:
+            buttons_collection.update_one(
+                {"chat_id": new_id, "keyword": btn["keyword"], "name": btn["name"]},
+                {"$set": {
+                    "url": btn["url"],
+                    "same_line": btn.get("same_line", True)
+                }},
+                upsert=True
+            )
+        buttons_collection.delete_many({"chat_id": old_id})
+
+        BTN[new_id] = BTN.get(old_id, {})
+        if old_id in BTN:
+            del BTN[old_id]
 
 __load_chat_filters()
