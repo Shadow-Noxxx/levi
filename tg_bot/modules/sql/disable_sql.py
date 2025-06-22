@@ -1,101 +1,72 @@
 import threading
-from sqlalchemy import Column, String, UnicodeText, func, distinct
-from tg_bot.modules.sql import SESSION, BASE
+from sql import db
 
-
-class Disable(BASE):
-    __tablename__ = "disabled_commands"
-
-    chat_id = Column(String(14), primary_key=True)
-    command = Column(UnicodeText, primary_key=True)
-
-    def __init__(self, chat_id, command):
-        self.chat_id = chat_id
-        self.command = command
-
-    def __repr__(self):
-        return f"Disabled cmd {self.command} in {self.chat_id}"
-
+# MongoDB collection
+disable_collection = db["disabled_commands"]
 
 DISABLE_INSERTION_LOCK = threading.RLock()
 DISABLED = {}
 
-
+# ✅ Disable a command for a chat
 def disable_command(chat_id, disable):
     with DISABLE_INSERTION_LOCK:
-        disabled = SESSION.query(Disable).get((str(chat_id), disable))
-
-        if not disabled:
+        exists = disable_collection.find_one({"chat_id": str(chat_id), "command": disable})
+        if not exists:
+            disable_collection.insert_one({"chat_id": str(chat_id), "command": disable})
             DISABLED.setdefault(str(chat_id), set()).add(disable)
-
-            disabled = Disable(str(chat_id), disable)
-            SESSION.add(disabled)
-            SESSION.commit()
             return True
-
-        SESSION.close()
         return False
 
-
+# ✅ Enable (remove) a command for a chat
 def enable_command(chat_id, enable):
     with DISABLE_INSERTION_LOCK:
-        disabled = SESSION.query(Disable).get((str(chat_id), enable))
-
-        if disabled:
-            if enable in DISABLED.get(str(chat_id), set()):
-                DISABLED.setdefault(str(chat_id), set()).remove(enable)
-
-            SESSION.delete(disabled)
-            SESSION.commit()
+        result = disable_collection.delete_one({"chat_id": str(chat_id), "command": enable})
+        if result.deleted_count:
+            DISABLED.get(str(chat_id), set()).discard(enable)
             return True
-
-        SESSION.close()
         return False
 
-
+# ✅ Check if a command is disabled
 def is_command_disabled(chat_id, cmd):
     return cmd in DISABLED.get(str(chat_id), set())
 
-
+# ✅ Get all disabled commands for a chat
 def get_all_disabled(chat_id):
     return DISABLED.get(str(chat_id), set())
 
-
+# ✅ Count number of unique chats with disabled commands
 def num_chats():
-    try:
-        return SESSION.query(func.count(distinct(Disable.chat_id))).scalar()
-    finally:
-        SESSION.close()
+    return len(disable_collection.distinct("chat_id"))
 
-
+# ✅ Count total number of disabled commands
 def num_disabled():
-    try:
-        return SESSION.query(Disable).count()
-    finally:
-        SESSION.close()
+    return disable_collection.count_documents({})
 
-
+# ✅ Migrate disabled commands from old chat to new chat
 def migrate_chat(old_chat_id, new_chat_id):
     with DISABLE_INSERTION_LOCK:
-        chats = SESSION.query(Disable).filter(Disable.chat_id == str(old_chat_id)).all()
-        for chat in chats:
-            chat.chat_id = str(new_chat_id)
-            SESSION.add(chat)
+        old_id = str(old_chat_id)
+        new_id = str(new_chat_id)
+        commands = disable_collection.find({"chat_id": old_id})
 
-        if str(old_chat_id) in DISABLED:
-            DISABLED[str(new_chat_id)] = DISABLED.get(str(old_chat_id), set())
+        for cmd in commands:
+            disable_collection.update_one(
+                {"chat_id": new_id, "command": cmd["command"]},
+                {"$set": {"chat_id": new_id, "command": cmd["command"]}},
+                upsert=True
+            )
 
-        SESSION.commit()
+        disable_collection.delete_many({"chat_id": old_id})
 
+        if old_id in DISABLED:
+            DISABLED[new_id] = DISABLED.get(old_id, set())
+            del DISABLED[old_id]
 
+# ✅ Load all disabled commands into memory on startup
 def __load_disabled_commands():
     global DISABLED
-    try:
-        all_chats = SESSION.query(Disable).all()
-        for chat in all_chats:
-            DISABLED.setdefault(chat.chat_id, set()).add(chat.command)
-    finally:
-        SESSION.close()
-
+    all_data = disable_collection.find()
+    for entry in all_data:
+        DISABLED.setdefault(entry["chat_id"], set()).add(entry["command"])
 
 __load_disabled_commands()
